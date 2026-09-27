@@ -1,0 +1,130 @@
+name: Build Executable
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build bmu.exe
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bmu-windows-x64
+          path: dist/bmu.exe
+          if-no-files-found: error
+
+  build-linux:
+    name: Build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build bmu
+        run: bash build.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bmu-linux-x64
+          path: dist/bmu
+          if-no-files-found: error
+
+  build-macos:
+    name: Build (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Restore npm dependencies
+        run: npm ci
+
+      - name: Bundle with esbuild
+        run: |
+          mkdir -p dist
+          npx esbuild main.js \
+              --bundle \
+              --platform=node \
+              --outfile=app.bundled.js \
+              --format=cjs \
+              --external:zlib --external:fs --external:path --external:stream \
+              --external:buffer --external:util --external:crypto --external:net \
+              --external:http --external:https --external:url --external:events \
+              --external:child_process --external:os
+
+      - name: Generate SEA blob
+        run: node --experimental-sea-config sea-config.json
+
+      - name: Copy node binary
+        run: |
+          cp "$(command -v node)" dist/bmu
+          chmod 755 dist/bmu
+
+      # macOS 下必须先移除 node 的签名才能注入，注入后再 ad-hoc 重签名，否则无法运行
+      - name: Remove signature
+        run: codesign --remove-signature dist/bmu
+
+      - name: Inject blob into executable
+        run: |
+          npx postject dist/bmu NODE_SEA_BLOB sea-prep.blob \
+              --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2 \
+              --overwrite
+
+      - name: Re-sign (ad-hoc)
+        run: codesign --sign - --force dist/bmu
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bmu-macos-arm64
+          path: dist/bmu
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/bmu-windows-x64/bmu.exe
+            artifacts/bmu-linux-x64/bmu
+            artifacts/bmu-macos-arm64/bmu
